@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: travel-helper-backend
+
+  ai:
+    openai:
+      # 火山方舟 API Key
+      api-key: ${ARK_API_KEY}
+
+      # 火山方舟标准 OpenAI 兼容端点；Coding Plan 请换成 https://ark.cn-beijing.volces.com/api/coding/v3
+      base-url: https://ark.cn-beijing.volces.com/api/v3
+
+      chat:
+        # 关键：覆盖 Spring AI 默认的 /v1/chat/completions，火山方舟的正确路径是 /chat/completions
+        completions-path: /chat/completions
+        options:
+          model: deepseek-v4-flash-ga-260731
+
+server:
+  port: 8080
+
+# 角色 -> system prompt 的映射，通过 ?role=xxx 传入
+travel-helper:
+  roles:
+    travel-advisor: 你是一名专业的旅游顾问，熟悉国内外热门目的地，擅长规划行程、推荐景点与美食。请用中文，热情友好地回答问题。
+    food-guide: 你是一名美食推荐官，擅长根据目的地推荐当地地道美食。请用中文，简洁地给出推荐。
+    translator: 你是一名翻译，请把用户输入的内容逐句翻译成中文和英文。
