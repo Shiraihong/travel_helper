@@ -35,6 +35,13 @@
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-openai</artifactId>
         </dependency>
+
+        <!-- 测试：JUnit 5 + Mockito + Spring Test + MockMvc + AssertJ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <!-- Spring AI BOM：统一管理所有 spring-ai 模块的版本 -->
