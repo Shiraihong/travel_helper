@@ -36,6 +36,21 @@ Prompt prompt = template.create(Map.of(
 ));
 ```
 
+### 1.3 什么是 Function Calling？
+
+LLM 本身只能生成文本，无法获取实时信息（天气、汇率、数据库内容）。Function Calling 让 LLM 能"决定调用哪个函数、传什么参数"，但**实际执行由你的 Java 代码完成**。
+
+- LLM 负责**决策**
+- 你的方法负责**执行**
+
+**没有 Function Calling：**
+
+### 1.3 Tool的注意事項？
+
+工具能抛异常吗	 能，但不推荐；内部 catch 返回友好文本更可控
+返回格式有要求吗 推荐 String，简洁、接近自然语言；避免原始 JSON
+工具重名会怎样	 会冲突，可能报错或覆盖；方法名不同或用 name 显式指定
+
 ### 遇到的问题
 
 ### 中文 key 在 Spring 配置里不可靠
