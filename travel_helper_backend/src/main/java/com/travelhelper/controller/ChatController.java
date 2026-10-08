@@ -3,6 +3,7 @@ package com.travelhelper.controller;
 import java.util.Map;
 
 import com.travelhelper.config.ChatProperties;
+import com.travelhelper.tools.WebSearchTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.http.HttpStatus;
@@ -30,9 +31,9 @@ public class ChatController {
             {preferences}
             """;
 
-    public ChatController(ChatClient.Builder builder, ChatProperties chatProperties) {
-        // ChatClient.Builder 由 Spring AI 自动配置注入
-        this.chatClient = builder.build();
+    public ChatController(ChatClient.Builder builder, ChatProperties chatProperties, WebSearchTools webSearchTools) {
+        // ChatClient.Builder 由 Spring AI 自动配置注入；注册 Tavily 联网搜索工具
+        this.chatClient = builder.defaultTools(webSearchTools).build();
         this.chatProperties = chatProperties;
     }
 

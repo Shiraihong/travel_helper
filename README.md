@@ -100,9 +100,11 @@ sequenceDiagram
 ```bash
 # 1. 设置环境变量（Windows PowerShell）
 $env:ARK_API_KEY = "你的火山方舟 API Key"
+$env:TAVILY_API_KEY = "你的 Tavily API Key"
 
 # macOS / Linux
 export ARK_API_KEY="你的火山方舟 API Key"
+export TAVILY_API_KEY="你的 Tavily API Key"
 
 # 2. 启动
 mvn spring-boot:run
@@ -120,6 +122,7 @@ curl "http://localhost:8080/api/chat?message=你好"
 | 变量名 | 说明 | 是否必填 | 示例 |
 |--------|------|:--------:|------|
 | `ARK_API_KEY` | 火山方舟（Ark）API Key | ✅ 必填 | `xxxxxxxx-xxxx-xxxx` |
+| `TAVILY_API_KEY` | Tavily 联网搜索 API Key | ✅ 必填（联网搜索功能） | `tvly-xxxxxx` |
 
 ### 模型相关配置（在 `application.yml` 中，非环境变量）
 
@@ -189,11 +192,12 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 - 同步一次性对话接口 `GET /api/chat`
 - 流式 SSE 对话接口 `GET /api/chat/stream`
 - 用户消息与偏好作为「数据」注入 `PromptTemplate`，防 prompt 注入
+- 联网搜索（Function Calling）：接入 Tavily，模型可自动查景点 / 攻略 / 实时信息
 - 单元测试（`@MockitoBean` mock 掉 `ChatModel`，测试接口非空 + 工具注册，无需真实调用大模型）
 
 ### 待实现 🚧
 
-- Function Calling（工具调用）：如查天气、汇率、机票/酒店等实时信息
+- 更多专业工具：天气、汇率、机票/酒店等结构化数据 API（如 `OpenWeatherMap`、`Amadeus`）
 - 多轮对话记忆（`ChatMemory`，带历史上下文）
 - 结构化输出（`beanOutput` / JSON 实体）
 - 认证鉴权（API Key / JWT）
@@ -255,6 +259,24 @@ LLM 本身只能生成文本，无法获取实时信息（天气、汇率、数�
 | 返回格式有要求吗 | 推荐 String，简洁、接近自然语言；避免原始 JSON |
 | 工具重名会怎样 | 会冲突，可能报错或覆盖；方法名不同或用 `name` 显式指定 |
 
+## 1.5 Search API
+
+- 选了：**Tavily**
+- 免费额度：**1000 credit/月**（basic 搜索 1 credit/次、advanced 2 credit/次），**无需信用卡**
+- 返回结构关键字段：`results[].title / url / content`（核心，喂给 LLM）；`score`（排序 + 去重）；`answer`（可选，本次未用）；`raw_content`（整页正文，默认丢弃）
+- 踩坑：
+  - `raw_content` 是 token 黑洞 → `include_raw_content=false`，只取 `content` 摘要
+  - `query` 与 `language` 语言要一致（中文查询 + `language: zh`），召回才准
+  - 同域名结果会重复 → 按域名去重、只留 `score` 最高的一条
+  - 中文通用内容可用，但大陆长尾（门票/开放时间/本地新闻）召回偏弱 → 必要时用百度（SerpAPI `engine=baidu`）兜底
+
+### 今日小结（2026-10-08）
+
+- 修复 ChatClient 单元测试：工具执行循环在 **ChatModel 内部**（`OpenAiChatModel` 持有 `ToolCallingManager`）而非 ChatClient，mock 模型无法模拟两轮回路 → 改为断言「工具已注册并随 Prompt 传给模型」
+- 完善 README：项目简介 / 技术栈 / 架构图 / 运行 / 环境变量 / API / 功能清单
+- 接入 Tavily 联网搜索：`config/TavilyProperties` + `tools/WebSearchTools`，注册进 `ChatController` 的 ChatClient
+- `WebSearchTools.format()` 优化：按域名去重 + 摘要按「码点安全 + 句末断句」截断（250 字）
+
 ### 遇到的问题
 
 #### 中文 key 在 Spring 配置里不可靠
@@ -264,3 +286,5 @@ LLM 本身只能生成文本，无法获取实时信息（天气、汇率、数�
 **原因**：Spring 的 PropertySource 底层是 String 匹配，中文涉及 UTF-8 编解码，不同配置源处理不一致。
 
 **解决**：配置 key 一律用英文（`travel-advisor`、`food-guide`），中文只放在 value 里。
+
+---
