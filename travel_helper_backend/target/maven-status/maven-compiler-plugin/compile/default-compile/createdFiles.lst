@@ -2,3 +2,4 @@ com\travelhelper\config\TavilyProperties.class
 com\travelhelper\tools\WebSearchTools.class
 com\travelhelper\tools\WebSearchTools$TavilyResponse.class
 com\travelhelper\tools\WebSearchTools$TavilyResult.class
+com\travelhelper\config\TavilyConfig.class

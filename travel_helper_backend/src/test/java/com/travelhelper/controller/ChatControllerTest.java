@@ -56,6 +56,36 @@ class ChatControllerTest {
     }
 
     @Test
+    void travelQuestionReturnsAnswerAndRegistersSearchTool() throws Exception {
+        // 用 mock 的 ChatModel 返回固定回复，避免真的调 DeepSeek API
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(
+                        new Generation(new AssistantMessage("（mock）东京3日游建议：Day1 浅草/上野，Day2 涩谷/原宿，Day3 台场")))));
+
+        mockMvc.perform(get("/api/chat")
+                        .param("message", "东京3天怎么玩")
+                        .param("role", "travel-advisor"))
+                .andExpect(status().isOk())
+                .andExpect(result -> {
+                    String body = result.getResponse().getContentAsString();
+                    assertThat(body).isNotBlank();
+                });
+
+        // 可选的「工具调用」断言。注意：ChatModel 被 mock 后，真正的两轮工具执行循环（在 ChatModel 内部）
+        // 不会真的跑起来，所以无法断言「日志里真的调用了 WebSearchTools」；
+        // 单测边界上只能断言「search 工具已注册、随 Prompt 一起交给了模型」。
+        ArgumentCaptor<Prompt> captor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel).call(captor.capture());
+
+        ChatOptions options = captor.getValue().getOptions();
+        assertThat(options).isInstanceOf(ToolCallingChatOptions.class);
+
+        boolean searchToolSent = ((ToolCallingChatOptions) options).getToolCallbacks().stream()
+                .anyMatch(tc -> "search".equals(tc.getToolDefinition().name()));
+        assertThat(searchToolSent).isTrue();
+    }
+
+    @Test
     void toolCallingIsTriggered() {
         when(chatModel.call(any(Prompt.class)))
                 .thenReturn(new ChatResponse(List.of(

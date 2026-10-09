@@ -208,6 +208,108 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 
 ---
 
+## 8. Spring AI 工具调用实战
+### 8.1 工具调用原理
+
+**一句话**：LLM 只能生成文本；「工具调用」本质是模型输出一段结构化的「我想调函数 X，参数是 Y」，**真正执行 X 的是我们自己的 Java 代码**，执行完再把结果塞回给模型，让它生成最终答复。
+
+在 Spring AI 里：
+
+1. 用 `@Tool` 标注方法、`@ToolParam` 标注参数。方法名就是工具名（也可用 `name` 覆盖），工具名 + 描述 + 参数 schema 会序列化进请求的 `tools` 字段发给模型。
+2. 用 `ChatClient.builder().defaultTools(webSearchTools).build()` 注册工具。
+3. 一轮「工具调用」的完整时序：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as 你的代码
+    participant CM as ChatModel(OpenAiChatModel)
+    participant LLM as 大模型
+    participant Tool as 你的 @Tool 方法
+
+    App->>CM: call(Prompt 带 tools)
+    CM->>LLM: POST /chat/completions（含 tools 定义）
+    LLM-->>CM: assistant message 带 tool_calls[]
+    CM->>Tool: 按 name 找到 ToolCallback 反射调用
+    Tool-->>CM: 返回结果字符串
+    CM->>LLM: 结果作为 tool 角色消息回填，再次请求
+    LLM-->>CM: 最终文本回复
+    CM-->>App: ChatResponse
+```
+
+**最容易踩的架构事实**：上面这个「执行循环」住在 **`ChatModel` 内部**（Spring AI 1.1.x 的 `OpenAiChatModel` 持有 `ToolCallingManager`），**而不是 `ChatClient`**。所以：
+
+- `ChatClient` 上做的只是「组装 Prompt + 注册工具」；
+- 真正「收 tool_calls → 执行 → 回填 → 再收最终答复」是模型的行为；
+- 单测里 **mock `ChatModel` 只能断言「工具已注册并随 Prompt 传给模型」，测不了两轮执行**（本仓库 `toolCallingIsTriggered`、`travelQuestionReturnsAnswerAndRegistersSearchTool` 用的就是这个边界）。
+
+另外两点：
+
+- **模型可并行调用多个工具**：同一轮 assistant message 里可以有多个 `tool_calls`，模型会「多拿证据」而不是严格二选一。
+- `ToolCallingChatOptions.isInternalToolExecutionEnabled()` 默认 `true`；关掉后 ChatClient 不再自动执行，需要你手动调用 `.toolExecution()`。
+
+### 8.2 工具描述怎么写
+
+工具名 + `description` + 参数 `description` 是模型「要不要调、怎么调」的**唯一依据**（模型看不到你的方法体）。写描述就是写「给模型的说明书」。
+
+**原则**：
+
+1. **写清楚「什么时候该用」**：触发条件 + 能力边界，而不是只说「这是一个搜索」。
+2. **参数描述给示例和格式**：建议语言、取值范围、示例值都要有。
+3. **避免职责重叠**：多个工具能力撞车会让模型困惑、两边都调、多烧配额。
+4. **返回对 LLM 友好的文本**：`String`、接近自然语言，别丢原始 JSON 或整页正文。
+
+对比：
+
+| | 差 | 好 |
+|---|---|---|
+| description | 「搜索」 | 「联网搜索景点、攻略、实时信息等外部知识；返回相关网页的标题、摘要和链接」 |
+| 参数 | `keyword`（无描述） | 「搜索关键词，建议使用中文」 |
+
+**反面教材**：本仓库做过的 `searchRestaurant` 假工具，命名/描述和通用 `search` 重叠（「搜索当地餐厅、美食」），结果模型面对「推荐餐厅」**两个都调了**。这本身就是反模式——与其按领域堆一堆搜索工具让模型挑，不如一个通用 `search`，把领域意图写进 query（如 `search("成都 火锅店 推荐")`）。
+
+### 8.3 容错策略
+
+**总原则**：
+
+- 工具方法**永不抛异常**，永远 `catch` 返回可读文本（异常会打断 tool-calling 循环，同步路径直接 500）；
+- 重试要克制（按次计费的 API，每次重试都在烧额度）；
+- 区分「瞬时错误 / 确定性错误 / 空结果」。
+
+| 场景 | 重试？ | 降级 | 返回给 LLM |
+|------|--------|------|-----------|
+| 网络超时 | 重试 1 次，退避 | 备用源 / 放弃 | 「联网搜索超时，暂无法获取实时信息」 |
+| 429 限流 | 读 `Retry-After`，指数退避 1~2 次 | 备用源 / 缓存 | 「搜索服务限流，请稍后重试」 |
+| 5xx | 重试 1 次，退避 | 备用源 / 放弃 | 「搜索服务故障，无法获取结果」 |
+| 空结果 | **不机械重试**，改写 query 再试 1 次 | 换更宽泛词 | 「未找到相关内容」 |
+| 参数非法 | **不重试**（确定性错误） | 入口校验/兜底 | 「参数不合法，请提供有效关键词」 |
+
+**本项目落地**（`WebSearchTools` + `TavilyConfig`）：
+
+- **5s 超时**：只作用在 Tavily 这个 `RestClient` 上（独立 `@Bean`），不污染 LLM 客户端——否则同步对话会被限时 500；
+- **失败重试 2 次、间隔 1s**；
+- **空结果**返回「未找到与「xx」相关内容。」；
+- **最终失败**返回友好兜底文案，让模型如实说明而非编造；
+- **`log.warn` 记录每次失败原因**。
+
+何时上框架：只要重试 → Spring Retry / 手写循环即可；要「重试 + 熔断 + 限流 + 监控」成套、防重试风暴 → Resilience4j。
+
+### 8.4 排查「工具没被调用」
+
+按从易到难：
+
+1. **注册了吗？** 类加了 `@Component` 被扫描到、`defaultTools(...)` 传进去了吗；用的 `chatClient` 是不是注册工具的那个实例。
+2. **描述是否太模糊/重叠？** 模型不知道该用哪个，可能干脆不用（或乱用）。
+3. **模型支持 Function Calling 吗？** 换成不支持工具调用的模型/端点，模型只会聊天。
+4. **内部执行开关被关了吗？** `isInternalToolExecutionEnabled == false` 时不会自动执行。
+5. **问题真的需要工具吗？** 问「你好」不调工具是正常表现，不是 bug。
+6. **看请求侧**：断点/日志看 `Prompt.getOptions()`（`ToolCallingChatOptions.getToolCallbacks()`）里有没有这个工具；没有 → 注册问题，有 → 模型没选它，回到第 2 点。
+7. **看执行侧**：在 `@Tool` 方法入口打断点 + `log`，确认是否真的被反射调用（这步在 mock 模型下不可达，见 8.1）。
+8. **要看完整两轮执行**：用 WireMock 挡住 OpenAI 协议，返回「先 tool_calls、后最终回复」两轮响应。
+9. **模型「宁可编也不搜」**：靠 system prompt 铁律约束（本仓库已在 `travel-advisor` 里加了「实时信息必须先调搜索、搜不到就如实说明」）。
+
+---
+
 ## 附录：开发笔记 / Notes & Lessons Learned
 
 ### 1. Spring AI 核心概念

@@ -1,7 +1,6 @@
 package com.travelhelper.tools;
 
 import java.net.URI;
-import java.time.Duration;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -14,8 +13,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -35,9 +34,6 @@ public class WebSearchTools {
     /** 结果相关性阈值：低于此分数的结果视为低相关/垃圾内容丢弃。 */
     private static final double MIN_SCORE = 0.5;
 
-    /** Tavily 请求超时（连接 + 读取），只作用于联网搜索客户端，不影响 LLM 的 HTTP 客户端。 */
-    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
-
     /** 首次失败后的额外重试次数（总共尝试 1 + MAX_RETRIES 次）。 */
     private static final int MAX_RETRIES = 2;
 
@@ -53,15 +49,11 @@ public class WebSearchTools {
     private final TavilyProperties properties;
     private final RestClient restClient;
 
-    public WebSearchTools(TavilyProperties properties, RestClient.Builder builder) {
+    public WebSearchTools(TavilyProperties properties,
+                          @Qualifier("tavilySearchRestClient") RestClient tavilyRestClient) {
         this.properties = properties;
-
-        // 只为 Tavily 单独设 5s 超时（独立 request factory）。
-        // 不要放进 yml 全局 spring.http.client 配置——那会连 LLM 的 HTTP 客户端一起限时，导致同步对话超时 500。
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(REQUEST_TIMEOUT);
-        requestFactory.setReadTimeout(REQUEST_TIMEOUT);
-        this.restClient = builder.requestFactory(requestFactory).build();
+        // 使用 TavilyConfig 单独配置的 5s 超时客户端（传输层独立，便于测试用 MockRestServiceServer 替换）
+        this.restClient = tavilyRestClient;
     }
 
     @Tool(description = "联网搜索景点、攻略、实时信息等外部知识；返回相关网页的标题、摘要和链接")
@@ -91,7 +83,7 @@ public class WebSearchTools {
             }
         }
         log.warn("Tavily 搜索重试 {} 次后仍失败，query=\"{}\"，最后失败原因：{}",
-                MAX_RETRIES, query, lastError == null ? "未知" : lastError);
+                MAX_RETRIES, query, lastError == null ? "未知" : lastError.toString());
         return null;
     }
 
