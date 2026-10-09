@@ -1,6 +1,7 @@
 package com.travelhelper.tools;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -9,9 +10,12 @@ import java.util.stream.Collectors;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.travelhelper.config.TavilyProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -28,12 +32,36 @@ public class WebSearchTools {
     /** 每条摘要的最大字数，防止单条异常长撑爆上下文。 */
     private static final int MAX_SNIPPET_LENGTH = 250;
 
+    /** 结果相关性阈值：低于此分数的结果视为低相关/垃圾内容丢弃。 */
+    private static final double MIN_SCORE = 0.5;
+
+    /** Tavily 请求超时（连接 + 读取），只作用于联网搜索客户端，不影响 LLM 的 HTTP 客户端。 */
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(5);
+
+    /** 首次失败后的额外重试次数（总共尝试 1 + MAX_RETRIES 次）。 */
+    private static final int MAX_RETRIES = 2;
+
+    /** 两次重试之间的等待时间。 */
+    private static final long RETRY_INTERVAL_MS = 1000;
+
+    /** 搜索彻底失败时回给 LLM 的兜底文案，让模型如实说明而非编造。 */
+    private static final String FALLBACK_MESSAGE =
+            "联网搜索暂时不可用（多次尝试后仍未成功），请基于已有知识回答，并明确告知用户未获取到最新实时信息。";
+
+    private static final Logger log = LoggerFactory.getLogger(WebSearchTools.class);
+
     private final TavilyProperties properties;
     private final RestClient restClient;
 
     public WebSearchTools(TavilyProperties properties, RestClient.Builder builder) {
         this.properties = properties;
-        this.restClient = builder.build();
+
+        // 只为 Tavily 单独设 5s 超时（独立 request factory）。
+        // 不要放进 yml 全局 spring.http.client 配置——那会连 LLM 的 HTTP 客户端一起限时，导致同步对话超时 500。
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(REQUEST_TIMEOUT);
+        requestFactory.setReadTimeout(REQUEST_TIMEOUT);
+        this.restClient = builder.requestFactory(requestFactory).build();
     }
 
     @Tool(description = "联网搜索景点、攻略、实时信息等外部知识；返回相关网页的标题、摘要和链接")
@@ -42,32 +70,63 @@ public class WebSearchTools {
             return "未配置 TAVILY_API_KEY，无法联网搜索。";
         }
 
+        TavilyResponse response = searchWithRetry(query);
+        return response == null ? FALLBACK_MESSAGE : format(response, query);
+    }
+
+    /** 带重试的搜索：失败最多额外重试 {@link #MAX_RETRIES} 次，每次间隔 {@link #RETRY_INTERVAL_MS}ms；仍失败返回 null。 */
+    private TavilyResponse searchWithRetry(String query) {
+        Exception lastError = null;
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return doSearch(query);
+            }
+            catch (Exception e) {
+                lastError = e;
+                log.warn("Tavily 搜索失败（第 {}/{} 次），query=\"{}\"，原因：{}",
+                        attempt + 1, MAX_RETRIES + 1, query, e.toString());
+                if (attempt < MAX_RETRIES) {
+                    sleepQuietly(RETRY_INTERVAL_MS);
+                }
+            }
+        }
+        log.warn("Tavily 搜索重试 {} 次后仍失败，query=\"{}\"，最后失败原因：{}",
+                MAX_RETRIES, query, lastError == null ? "未知" : lastError);
+        return null;
+    }
+
+    /** 单次 HTTP 调用；网络异常 / 非 2xx 会以异常形式抛出，交由 {@link #searchWithRetry(String)} 重试。 */
+    private TavilyResponse doSearch(String query) {
+        // 可选：需要时加 include_domains（白名单）/ exclude_domains（黑名单）进一步挡掉广告站、内容农场
         Map<String, Object> body = Map.of(
                 "query", query,
                 "search_depth", "basic",
                 "max_results", 5,
                 "language", "zh");
 
-        try {
-            TavilyResponse response = this.restClient.post()
-                    .uri(properties.getBaseUrl() + "/search")
-                    .header("Authorization", "Bearer " + properties.getApiKey())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(TavilyResponse.class);
+        return this.restClient.post()
+                .uri(properties.getBaseUrl() + "/search")
+                .header("Authorization", "Bearer " + properties.getApiKey())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body)
+                .retrieve()
+                .body(TavilyResponse.class);
+    }
 
-            return format(response, query);
+    /** 忽略中断地等待指定毫秒；被中断时保留中断标志并返回。 */
+    private void sleepQuietly(long millis) {
+        try {
+            Thread.sleep(millis);
         }
-        catch (Exception e) {
-            return "联网搜索失败：" + e.getMessage() + "（查询：\"" + query + "\"）";
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
     /** 把 Tavily 返回整理成 LLM 易读的文本：去重、截断、只保留核心字段。 */
     private String format(TavilyResponse response, String query) {
         if (response == null || response.results() == null || response.results().isEmpty()) {
-            return "未找到与「" + query + "」相关的搜索结果。";
+            return "未找到与「" + query + "」相关内容。";
         }
 
         List<TavilyResult> results = dedup(response.results());
@@ -87,9 +146,10 @@ public class WebSearchTools {
         return sb.toString();
     }
 
-    /** 去近似重复：按域名分组，只保留每组 score 最高的一条，并按 score 降序排列。 */
+    /** 过滤低分结果 + 去近似重复：按域名分组保留 score 最高的一条，并按 score 降序排列。 */
     private List<TavilyResult> dedup(List<TavilyResult> results) {
         return results.stream()
+                .filter(r -> r.score() == null || r.score() >= MIN_SCORE)   // 丢低相关/垃圾结果
                 .sorted(Comparator.comparing((TavilyResult r) -> r.score() == null ? 0.0 : r.score()).reversed())
                 .collect(Collectors.toMap(
                         this::hostOf,
