@@ -3,8 +3,11 @@ package com.travelhelper.controller;
 import java.util.Map;
 
 import com.travelhelper.config.ChatProperties;
+import com.travelhelper.tools.TimeTools;
 import com.travelhelper.tools.WebSearchTools;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -31,24 +34,32 @@ public class ChatController {
             {preferences}
             """;
 
-    public ChatController(ChatClient.Builder builder, ChatProperties chatProperties, WebSearchTools webSearchTools) {
-        // ChatClient.Builder 由 Spring AI 自动配置注入；注册 Tavily 联网搜索工具
-        this.chatClient = builder.defaultTools(webSearchTools).build();
+    /** 未传 conversationId 时的默认会话 ID（所有匿名请求共享，仅用于演示；生产环境应要求客户端传入唯一 ID 实现隔离）。 */
+    private static final String DEFAULT_CONVERSATION_ID = "default";
+
+    public ChatController(ChatClient.Builder builder, ChatProperties chatProperties, WebSearchTools webSearchTools,
+                          TimeTools timeTools, ChatMemory chatMemory) {
+        // 注册联网搜索 + 时间工具，以及多轮记忆 advisor（按 conversationId 区分会话）
+        this.chatClient = builder
+                .defaultTools(webSearchTools, timeTools)
+                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+                .build();
         this.chatProperties = chatProperties;
     }
 
     /**
      * 模式一 / 模式三（同步）：
      *   GET /api/chat?message=推荐一个成都3日游行程
-     *   GET /api/chat?message=...&role=travel-advisor&prefs=出发地北京,3天,预算2000,2人,喜欢美食
-     * role 切换 system prompt；prefs 为可选用户偏好，动态注入模板。
+     *   GET /api/chat?message=...&role=travel-advisor&prefs=出发地北京,3天,预算2000,2人,喜欢美食&conversationId=user-1
+     * role 切换 system prompt；prefs 为可选用户偏好；conversationId 开启多轮记忆（同一 ID 共享上下文，不同 ID 隔离）。
      * 一次性返回 AI 的完整文本回复。
      */
     @GetMapping(value = "/api/chat", produces = "text/plain;charset=UTF-8")
     public String chat(@RequestParam String message,
                        @RequestParam(required = false) String role,
-                       @RequestParam(required = false) String prefs) {
-        return prompt(message, role, prefs).call().content();
+                       @RequestParam(required = false) String prefs,
+                       @RequestParam(required = false) String conversationId) {
+        return prompt(message, role, prefs, conversationId).call().content();
     }
 
     /**
@@ -59,8 +70,9 @@ public class ChatController {
     @GetMapping(value = "/api/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter chatStream(@RequestParam String message,
                                  @RequestParam(required = false) String role,
-                                 @RequestParam(required = false) String prefs) {
-        Flux<String> stream = prompt(message, role, prefs).stream().content()
+                                 @RequestParam(required = false) String prefs,
+                                 @RequestParam(required = false) String conversationId) {
+        Flux<String> stream = prompt(message, role, prefs, conversationId).stream().content()
                 .publishOn(Schedulers.boundedElastic());
 
         SseEmitter emitter = new SseEmitter();
@@ -81,11 +93,17 @@ public class ChatController {
      * 组装提示词：system prompt 只取受信任的配置；用户输入与偏好作为「数据」
      * 拼进 user 消息并用分隔符标注，避免把不可信文本注入 system prompt。
      */
-    private ChatClient.ChatClientRequestSpec prompt(String message, String role, String prefs) {
+    private ChatClient.ChatClientRequestSpec prompt(String message, String role, String prefs, String conversationId) {
         ChatClient.ChatClientRequestSpec spec = chatClient.prompt();
         if (role != null && !role.isBlank()) {
             spec = spec.system(systemPrompt(role.trim()));
         }
+        // MessageChatMemoryAdvisor 要求 conversationId 非空：同一 ID 命中同一条历史，不同 ID 互相隔离；
+        // 未传时落到默认会话，保证请求不报错（生产环境应由客户端传入唯一 ID）。
+        String memoryId = (conversationId == null || conversationId.isBlank())
+                ? DEFAULT_CONVERSATION_ID
+                : conversationId.trim();
+        spec = spec.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, memoryId));
         return spec.user(buildUserMessage(message, prefs));
     }
 

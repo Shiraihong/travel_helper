@@ -62,6 +62,10 @@ travel-helper:
     food-guide: 你是一名美食推荐官，擅长根据目的地推荐当地地道美食。请用中文，简洁地给出推荐。
     translator: 你是一名翻译，请把用户输入的内容逐句翻译成中文和英文。
 
+  # 多轮对话记忆：每个会话保留的最大消息条数（超过后遗忘最早的消息）
+  memory:
+    max-messages: 20
+
 # Tavily 联网搜索
 tavily:
   # API Key 来自环境变量 TAVILY_API_KEY

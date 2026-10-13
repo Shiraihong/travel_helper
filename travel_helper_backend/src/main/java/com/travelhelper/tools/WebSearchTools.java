@@ -61,7 +61,6 @@ public class WebSearchTools {
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
             return "未配置 TAVILY_API_KEY，无法联网搜索。";
         }
-
         TavilyResponse response = searchWithRetry(query);
         return response == null ? FALLBACK_MESSAGE : format(response, query);
     }

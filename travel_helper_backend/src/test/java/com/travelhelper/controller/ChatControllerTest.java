@@ -21,6 +21,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -83,6 +84,35 @@ class ChatControllerTest {
         boolean searchToolSent = ((ToolCallingChatOptions) options).getToolCallbacks().stream()
                 .anyMatch(tc -> "search".equals(tc.getToolDefinition().name()));
         assertThat(searchToolSent).isTrue();
+    }
+
+    @Test
+    void conversationRemembersWithinSameConversationId() throws Exception {
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(
+                        new Generation(new AssistantMessage("ok")))));
+
+        // 独立 conversationId，避免和别的测试 / 无 ID 请求共用同一条历史
+        String conversationId = "memtest-" + System.nanoTime();
+
+        mockMvc.perform(get("/api/chat")
+                        .param("message", "我叫小明，喜欢火锅")
+                        .param("conversationId", conversationId))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/chat")
+                        .param("message", "我刚才说自己叫什么")
+                        .param("conversationId", conversationId))
+                .andExpect(status().isOk());
+
+        // 两轮各调一次模型，抓取发给模型的 Prompt
+        ArgumentCaptor<Prompt> captor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, times(2)).call(captor.capture());
+
+        // 第二轮上下文里应同时包含第一轮和本轮的用户消息
+        String secondPromptText = captor.getAllValues().get(1).getInstructions().toString();
+        assertThat(secondPromptText)
+                .contains("我叫小明")
+                .contains("我刚才说自己叫什么");
     }
 
     @Test

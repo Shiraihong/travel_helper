@@ -132,6 +132,7 @@ curl "http://localhost:8080/api/chat?message=你好"
 | `spring.ai.openai.chat.completions-path` | `/chat/completions` | 覆盖默认 `/v1/chat/completions`，火山方舟正确路径 |
 | `spring.ai.openai.chat.options.model` | `deepseek-v4-flash-ga-260731` | 模型名 |
 | `server.port` | `8080` | 服务端口 |
+| `travel-helper.memory.max-messages` | `20` | 多轮记忆：每个会话保留的最大消息条数 |
 
 ---
 
@@ -148,6 +149,7 @@ curl "http://localhost:8080/api/chat?message=你好"
 | `message` | string | ✅ | 用户问题 |
 | `role` | string | ❌ | 角色：`travel-advisor` / `food-guide` / `translator`；不传则不带 system prompt |
 | `prefs` | string | ❌ | 用户偏好（出发地、天数、预算、人数、兴趣等），作为数据注入模板 |
+| `conversationId` | string | ❌ | 多轮记忆会话 ID：同一 ID 共享历史上下文、不同 ID 隔离；不传则落入默认会话 |
 
 **响应**：`200`，`Content-Type: text/plain;charset=UTF-8`，body 为 AI 回复文本。
 
@@ -159,6 +161,13 @@ curl "http://localhost:8080/api/chat?message=推荐一个成都3日游行程"
 
 # 带角色 + 偏好
 curl "http://localhost:8080/api/chat?message=帮我规划行程&role=travel-advisor&prefs=出发地北京,3天,预算2000,2人,喜欢美食"
+```
+
+多轮对话示例（同一 `conversationId` 共享上下文）：
+
+```bash
+curl "http://localhost:8080/api/chat?message=我想去东京玩3天&role=travel-advisor&conversationId=user-1"
+curl "http://localhost:8080/api/chat?message=那第二天怎么安排&conversationId=user-1"
 ```
 
 ### 6.2 流式对话 `GET /api/chat/stream`
@@ -193,12 +202,12 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 - 流式 SSE 对话接口 `GET /api/chat/stream`
 - 用户消息与偏好作为「数据」注入 `PromptTemplate`，防 prompt 注入
 - 联网搜索（Function Calling）：接入 Tavily，模型可自动查景点 / 攻略 / 实时信息
+- 多轮对话记忆（`ChatMemory` + `MessageChatMemoryAdvisor`，按 `conversationId` 共享 / 隔离上下文）
 - 单元测试（`@MockitoBean` mock 掉 `ChatModel`，测试接口非空 + 工具注册，无需真实调用大模型）
 
 ### 待实现 🚧
 
 - 更多专业工具：天气、汇率、机票/酒店等结构化数据 API（如 `OpenWeatherMap`、`Amadeus`）
-- 多轮对话记忆（`ChatMemory`，带历史上下文）
 - 结构化输出（`beanOutput` / JSON 实体）
 - 认证鉴权（API Key / JWT）
 - 用户偏好 / 历史行程持久化（数据库）
