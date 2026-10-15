@@ -20,11 +20,13 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.matchesRegex;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -33,6 +35,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringBootTest
 @AutoConfigureMockMvc
 class ChatControllerTest {
+
+    private static final String UUID_PATTERN =
+            "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
 
     @Autowired
     private MockMvc mockMvc;
@@ -50,10 +55,33 @@ class ChatControllerTest {
 
         mockMvc.perform(get("/api/chat").param("message", "你好"))
                 .andExpect(status().isOk())
-                .andExpect(result -> {
-                    String body = result.getResponse().getContentAsString();
-                    assertThat(body).isNotBlank();
-                });
+                .andExpect(jsonPath("$.content").isNotEmpty());
+    }
+
+    @Test
+    void chatWithoutConversationIdGeneratesUuid() throws Exception {
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(
+                        new Generation(new AssistantMessage("ok")))));
+
+        mockMvc.perform(get("/api/chat").param("message", "你好"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.conversationId").value(matchesRegex(UUID_PATTERN)))
+                .andExpect(jsonPath("$.content").value("ok"));
+    }
+
+    @Test
+    void chatWithConversationIdEchoesProvidedId() throws Exception {
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(
+                        new Generation(new AssistantMessage("ok")))));
+
+        mockMvc.perform(get("/api/chat")
+                        .param("message", "你好")
+                        .param("conversationId", " my-session "))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.conversationId").value("my-session"))
+                .andExpect(jsonPath("$.content").value("ok"));
     }
 
     @Test
@@ -67,10 +95,7 @@ class ChatControllerTest {
                         .param("message", "东京3天怎么玩")
                         .param("role", "travel-advisor"))
                 .andExpect(status().isOk())
-                .andExpect(result -> {
-                    String body = result.getResponse().getContentAsString();
-                    assertThat(body).isNotBlank();
-                });
+                .andExpect(jsonPath("$.content").isNotEmpty());
 
         // 可选的「工具调用」断言。注意：ChatModel 被 mock 后，真正的两轮工具执行循环（在 ChatModel 内部）
         // 不会真的跑起来，所以无法断言「日志里真的调用了 WebSearchTools」；
@@ -98,7 +123,8 @@ class ChatControllerTest {
         mockMvc.perform(get("/api/chat")
                         .param("message", "我叫小明，喜欢火锅")
                         .param("conversationId", conversationId))
-                .andExpect(status().isOk());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.conversationId").value(conversationId));
         mockMvc.perform(get("/api/chat")
                         .param("message", "我刚才说自己叫什么")
                         .param("conversationId", conversationId))

@@ -115,6 +115,26 @@ curl "http://localhost:8080/api/chat?message=你好"
 
 启动成功后默认端口 **8080**。
 
+### 数据库：默认 H2，可选连 Neon（PostgreSQL）
+
+已接入 JDBC + HikariCP。默认使用**本地 H2 文件库**（`./data/travelhelper`，跨重启保留），**无需任何环境变量**，离线也能跑开发与测试；数据库文件在 `data/` 目录，已加入 `.gitignore`。
+
+多轮对话记忆由 `JdbcChatMemoryRepository` 落库到 `SPRING_AI_CHAT_MEMORY` 表（外层 `MessageWindowChatMemory` 做滑动窗口）：H2 文件库与 Neon 都跨重启保留。
+
+想连 Neon（在家 / 有外网时），激活 `neon` profile 并设置 `DATABASE_URL`（`application-neon.yml` 会自动补 `jdbc:` 前缀）：
+
+```bash
+# PowerShell
+$env:DATABASE_URL = "postgresql://user:password@host/neondb?sslmode=require"
+mvn spring-boot:run -Dspring-boot.run.profiles=neon
+
+# macOS / Linux
+# export DATABASE_URL='postgresql://user:password@host/neondb?sslmode=require'
+# SPRING_PROFILES_ACTIVE=neon mvn spring-boot:run
+```
+
+相关冒烟测试：`DatasourceSmokeTest` 验证 H2（始终绿）；`NeonSmokeTest` 仅在设置了 `DATABASE_URL` 时真正连 Neon，否则自动跳过。
+
 ---
 
 ## 5. 环境变量说明
@@ -123,6 +143,7 @@ curl "http://localhost:8080/api/chat?message=你好"
 |--------|------|:--------:|------|
 | `ARK_API_KEY` | 火山方舟（Ark）API Key | ✅ 必填 | `xxxxxxxx-xxxx-xxxx` |
 | `TAVILY_API_KEY` | Tavily 联网搜索 API Key | ✅ 必填（联网搜索功能） | `tvly-xxxxxx` |
+| `DATABASE_URL` | Neon（PostgreSQL）连接串，仅连 Neon 时用 | ❌ 可选 | `postgresql://user:pass@host/neondb?sslmode=require` |
 
 ### 模型相关配置（在 `application.yml` 中，非环境变量）
 
@@ -149,9 +170,13 @@ curl "http://localhost:8080/api/chat?message=你好"
 | `message` | string | ✅ | 用户问题 |
 | `role` | string | ❌ | 角色：`travel-advisor` / `food-guide` / `translator`；不传则不带 system prompt |
 | `prefs` | string | ❌ | 用户偏好（出发地、天数、预算、人数、兴趣等），作为数据注入模板 |
-| `conversationId` | string | ❌ | 多轮记忆会话 ID：同一 ID 共享历史上下文、不同 ID 隔离；不传则落入默认会话 |
+| `conversationId` | string | ❌ | 多轮记忆会话 ID：同一 ID 共享历史上下文、不同 ID 隔离；不传则后端自动生成 UUID 并在响应中返回 |
 
-**响应**：`200`，`Content-Type: text/plain;charset=UTF-8`，body 为 AI 回复文本。
+**响应**：`200`，`Content-Type: application/json`，返回 `conversationId`（会话 ID，不传时后端自动生成）与 `content`（AI 回复文本）：
+
+```json
+{"conversationId": "6b8e...-uuid", "content": "AI 回复文本"}
+```
 
 **示例**
 
@@ -202,7 +227,7 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 - 流式 SSE 对话接口 `GET /api/chat/stream`
 - 用户消息与偏好作为「数据」注入 `PromptTemplate`，防 prompt 注入
 - 联网搜索（Function Calling）：接入 Tavily，模型可自动查景点 / 攻略 / 实时信息
-- 多轮对话记忆（`ChatMemory` + `MessageChatMemoryAdvisor`，按 `conversationId` 共享 / 隔离上下文）
+- 多轮对话记忆（`ChatMemory` + `MessageChatMemoryAdvisor`，按 `conversationId` 共享 / 隔离上下文；`JdbcChatMemoryRepository` 落库，H2 / Neon 持久化）
 - 单元测试（`@MockitoBean` mock 掉 `ChatModel`，测试接口非空 + 工具注册，无需真实调用大模型）
 
 ### 待实现 🚧

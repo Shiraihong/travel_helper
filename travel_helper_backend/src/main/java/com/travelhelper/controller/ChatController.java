@@ -1,6 +1,7 @@
 package com.travelhelper.controller;
 
 import java.util.Map;
+import java.util.UUID;
 
 import com.travelhelper.config.ChatProperties;
 import com.travelhelper.tools.TimeTools;
@@ -34,9 +35,6 @@ public class ChatController {
             {preferences}
             """;
 
-    /** 未传 conversationId 时的默认会话 ID（所有匿名请求共享，仅用于演示；生产环境应要求客户端传入唯一 ID 实现隔离）。 */
-    private static final String DEFAULT_CONVERSATION_ID = "default";
-
     public ChatController(ChatClient.Builder builder, ChatProperties chatProperties, WebSearchTools webSearchTools,
                           TimeTools timeTools, ChatMemory chatMemory) {
         // 注册联网搜索 + 时间工具，以及多轮记忆 advisor（按 conversationId 区分会话）
@@ -52,14 +50,16 @@ public class ChatController {
      *   GET /api/chat?message=推荐一个成都3日游行程
      *   GET /api/chat?message=...&role=travel-advisor&prefs=出发地北京,3天,预算2000,2人,喜欢美食&conversationId=user-1
      * role 切换 system prompt；prefs 为可选用户偏好；conversationId 开启多轮记忆（同一 ID 共享上下文，不同 ID 隔离）。
-     * 一次性返回 AI 的完整文本回复。
+     * 不传 conversationId 时后端自动生成 UUID；响应体为 JSON，包含 conversationId 与 content。
      */
-    @GetMapping(value = "/api/chat", produces = "text/plain;charset=UTF-8")
-    public String chat(@RequestParam String message,
-                       @RequestParam(required = false) String role,
-                       @RequestParam(required = false) String prefs,
-                       @RequestParam(required = false) String conversationId) {
-        return prompt(message, role, prefs, conversationId).call().content();
+    @GetMapping(value = "/api/chat", produces = MediaType.APPLICATION_JSON_VALUE)
+    public ChatReply chat(@RequestParam String message,
+                          @RequestParam(required = false) String role,
+                          @RequestParam(required = false) String prefs,
+                          @RequestParam(required = false) String conversationId) {
+        String sessionId = resolveConversationId(conversationId);
+        String content = prompt(message, role, prefs, sessionId).call().content();
+        return new ChatReply(sessionId, content);
     }
 
     /**
@@ -72,7 +72,7 @@ public class ChatController {
                                  @RequestParam(required = false) String role,
                                  @RequestParam(required = false) String prefs,
                                  @RequestParam(required = false) String conversationId) {
-        Flux<String> stream = prompt(message, role, prefs, conversationId).stream().content()
+        Flux<String> stream = prompt(message, role, prefs, resolveConversationId(conversationId)).stream().content()
                 .publishOn(Schedulers.boundedElastic());
 
         SseEmitter emitter = new SseEmitter();
@@ -98,12 +98,8 @@ public class ChatController {
         if (role != null && !role.isBlank()) {
             spec = spec.system(systemPrompt(role.trim()));
         }
-        // MessageChatMemoryAdvisor 要求 conversationId 非空：同一 ID 命中同一条历史，不同 ID 互相隔离；
-        // 未传时落到默认会话，保证请求不报错（生产环境应由客户端传入唯一 ID）。
-        String memoryId = (conversationId == null || conversationId.isBlank())
-                ? DEFAULT_CONVERSATION_ID
-                : conversationId.trim();
-        spec = spec.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, memoryId));
+        // conversationId 已由调用方解析为非空：同一 ID 命中同一条历史，不同 ID 互相隔离
+        spec = spec.advisors(a -> a.param(ChatMemory.CONVERSATION_ID, conversationId));
         return spec.user(buildUserMessage(message, prefs));
     }
 
@@ -124,5 +120,17 @@ public class ChatController {
         String prefs = (preferences == null || preferences.isBlank()) ? "未提供" : preferences.trim();
         return new PromptTemplate(USER_MESSAGE_TEMPLATE)
                 .render(Map.of("message", message, "preferences", prefs));
+    }
+
+    /** 解析会话 ID：传入则复用（trim 后），否则后端生成一个新的 UUID。 */
+    private String resolveConversationId(String conversationId) {
+        if (conversationId != null && !conversationId.isBlank()) {
+            return conversationId.trim();
+        }
+        return UUID.randomUUID().toString();
+    }
+
+    /** /api/chat 的返回体：会话 ID + 本轮回复内容。 */
+    public record ChatReply(String conversationId, String content) {
     }
 }

@@ -2,6 +2,12 @@ spring:
   application:
     name: travel-helper-backend
 
+  datasource:
+    # 默认：本地 H2 文件库（./data/travelhelper，跨重启保留），连不上 Neon 也能跑、也能跑测试。
+    # 要连 Neon/Postgres 时，用 neon profile（application-neon.yml）+ 环境变量 DATABASE_URL。
+    url: jdbc:h2:file:./data/travelhelper
+    driver-class-name: org.h2.Driver
+
   ai:
     openai:
       # 火山方舟 API Key
@@ -15,6 +21,16 @@ spring:
         completions-path: /chat/completions
         options:
           model: deepseek-v4-1-flash-260910
+
+    chat:
+      memory:
+        repository:
+          jdbc:
+            # H2 文件库（jdbc:h2:file:）不被 Spring Boot 视为「embedded」，
+            # 默认的 embedded 模式会跳过建表，导致 SPRING_AI_CHAT_MEMORY 不存在。
+            # 改成 always：每次启动都执行建表脚本。H2 脚本非幂等，但 Spring AI 已设
+            # continue-on-error=true，重复启动时「已存在」的报错会被吞掉，跨重启不丢数据。
+            initialize-schema: always
 
 server:
   port: 8080

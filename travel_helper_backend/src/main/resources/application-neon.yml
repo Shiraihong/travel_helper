@@ -1,0 +1,12 @@
+# Neon / PostgreSQL 数据源：在家能连 Neon 时启用。
+#
+# 启用方式（先 export DATABASE_URL='postgresql://...'）：
+#   mvn spring-boot:run -Dspring-boot.run.profiles=neon
+# 或设置环境变量 SPRING_PROFILES_ACTIVE=neon。
+spring:
+  datasource:
+    # Neon 连接串是 postgresql:// 开头，前面补 jdbc:
+    url: jdbc:${DATABASE_URL}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 5   # Neon 免费档连接数有限，别用默认 10

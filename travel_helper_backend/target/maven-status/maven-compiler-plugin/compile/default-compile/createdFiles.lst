@@ -2,7 +2,7 @@ com\travelhelper\config\TavilyProperties.class
 com\travelhelper\config\ChatMemoryProperties.class
 com\travelhelper\tools\TimeTools.class
 com\travelhelper\tools\WebSearchTools.class
-com\travelhelper\tools\WebSearchTools$TavilyResponse.class
 com\travelhelper\config\ChatMemoryConfig.class
 com\travelhelper\tools\WebSearchTools$TavilyResult.class
+com\travelhelper\tools\WebSearchTools$TavilyResponse.class
 com\travelhelper\config\TavilyConfig.class
