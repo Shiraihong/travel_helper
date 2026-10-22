@@ -119,7 +119,7 @@ curl "http://localhost:8080/api/chat?message=你好"
 
 已接入 JDBC + HikariCP。默认使用**本地 H2 文件库**（`./data/travelhelper`，跨重启保留），**无需任何环境变量**，离线也能跑开发与测试；数据库文件在 `data/` 目录，已加入 `.gitignore`。
 
-多轮对话记忆由 `JdbcChatMemoryRepository` 落库到 `SPRING_AI_CHAT_MEMORY` 表（外层 `MessageWindowChatMemory` 做滑动窗口）：H2 文件库与 Neon 都跨重启保留。
+多轮对话记忆由 `JdbcChatMemoryRepository` 落库到 `SPRING_AI_CHAT_MEMORY` 表（外层 `MessageWindowChatMemory` 做滑动窗口）：H2 文件库与 Neon 都跨重启保留（详见 §7 多轮对话）。
 
 想连 Neon（在家 / 有外网时），激活 `neon` profile 并设置 `DATABASE_URL`（`application-neon.yml` 会自动补 `jdbc:` 前缀）：
 
@@ -151,9 +151,10 @@ mvn spring-boot:run -Dspring-boot.run.profiles=neon
 |--------|--------|------|
 | `spring.ai.openai.base-url` | `https://ark.cn-beijing.volces.com/api/v3` | 火山方舟 OpenAI 兼容端点；Coding Plan 需换成 `/api/coding/v3` |
 | `spring.ai.openai.chat.completions-path` | `/chat/completions` | 覆盖默认 `/v1/chat/completions`，火山方舟正确路径 |
-| `spring.ai.openai.chat.options.model` | `deepseek-v4-flash-ga-260731` | 模型名 |
+| `spring.ai.openai.chat.options.model` | `deepseek-v4-1-flash-260910` | 模型名 |
 | `server.port` | `8080` | 服务端口 |
-| `travel-helper.memory.max-messages` | `20` | 多轮记忆：每个会话保留的最大消息条数 |
+| `travel-helper.memory.max-messages` | `20` | 多轮记忆：每个会话保留的最大消息条数（滑动窗口大小） |
+| `travel-helper.memory.expire-days` | `7` | 会话过期天数：超过 N 天没活动会被每天凌晨的定时任务清理 |
 
 ---
 
@@ -218,7 +219,130 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 
 ---
 
-## 7. 已实现功能 / 待实现
+## 7. 多轮对话（记忆）
+
+多轮对话让模型「记住上文」。本节说明本项目记忆系统的实现机制、会话 ID 设计、持久化选型、上下文裁剪策略、过期清理与测试方法。
+
+### 7.1 Spring AI 的 ChatMemory 机制
+
+Spring AI 用两层抽象组织「聊天记忆」：
+
+| 接口 / 类 | 职责 |
+|---|---|
+| `ChatMemory` | 面向使用方的高层接口：`add(conversationId, Message)`、`add(conversationId, List<Message>)`、`get(conversationId)`、`clear(conversationId)` |
+| `ChatMemoryRepository` | 面向存储的底层接口：`findConversationIds()`、`findByConversationId()`、`saveAll()`、`deleteByConversationId()` |
+| `MessageWindowChatMemory` | `ChatMemory` 的实现类，包装一个 repository 并施加「最近 N 条」滑动窗口 |
+| `MessageChatMemoryAdvisor` | Advisor 拦截器，在模型调用前后读写记忆 |
+
+一次请求内部流转（由 `MessageChatMemoryAdvisor` 驱动）：
+
+1. `before()`：按 `conversationId` 取出历史 → 合并进 prompt（`SystemMessage` 提到最前）→ 把本轮 user 消息写入记忆；
+2. 调用模型生成回复；
+3. `after()`：把 assistant 回复写入记忆。
+
+因此**每完成一轮对话，持久化 1 条 user + 1 条 assistant = 2 条消息**。
+
+本项目装配（`ChatMemoryConfig`）：JDBC 的 `ChatMemoryRepository` 由 Spring AI 自动配置提供，我们只需把它包进 `MessageWindowChatMemory`：
+
+```java
+@Bean
+ChatMemory chatMemory(ChatMemoryProperties properties, ChatMemoryRepository repo) {
+    return MessageWindowChatMemory.builder()
+            .chatMemoryRepository(repo)
+            .maxMessages(properties.getMaxMessages())
+            .build();
+}
+```
+
+`ChatController` 里注册 `MessageChatMemoryAdvisor.builder(chatMemory).build()`，并在每次请求时通过 `ChatMemory.CONVERSATION_ID` 参数把会话 ID 传给 advisor。
+
+### 7.2 conversationId 设计
+
+`conversationId` 是记忆的「分片键」，规则很简单：
+
+- **同一 ID = 共享上下文**：多轮请求带相同 ID，模型能看到之前聊过的内容；
+- **不同 ID = 完全隔离**：会话间互不串扰；
+- **不传 = 后端自动生成**：生成一个 UUID，在响应体 `conversationId` 字段返回；客户端应保存并在后续请求原样回传，才能续上对话。
+
+设计要点：
+
+- ID 是**普通字符串**，粒度由客户端决定——一个用户一个 ID、或一个话题一个 ID 均可；
+- 传参走 `ChatMemory.CONVERSATION_ID` 这个 advisor 参数，`ChatController` 原样透传；
+- 滑动窗口与过期清理都以 `conversationId` 为单位：每个会话各自维护窗口、各自计时过期。
+
+```bash
+# 第一轮：拿到返回里的 conversationId
+curl 'http://localhost:8080/api/chat?message=推荐成都3日游'
+
+# 第二轮：原样回传，续上上下文
+curl 'http://localhost:8080/api/chat?message=第2天想去熊猫基地&conversationId=<上一步的id>'
+```
+
+### 7.3 持久化方案对比
+
+Spring AI 内置两种 `ChatMemoryRepository`：
+
+| 方案 | 优点 | 缺点 | 适用 |
+|---|---|---|---|
+| `InMemoryChatMemoryRepository` | 零依赖、快、无需配置 | 进程重启即丢，多实例不共享 | 演示、单元测试 |
+| `JdbcChatMemoryRepository` | 落库、跨重启保留、按方言适配 H2 / PostgreSQL 等 | 需要数据源与建表 | **本项目选择** |
+
+本项目用 JDBC：默认 **H2 文件库** `jdbc:h2:file:./data/travelhelper`（数据在 `data/`，重启不丢、离线可跑）；上生产连 **Neon/PostgreSQL** 时切 `neon` profile + `DATABASE_URL`。表为 Spring AI 标准表 `SPRING_AI_CHAT_MEMORY`：
+
+| 列 | 说明 |
+|---|---|
+| `conversation_id` | 会话 ID |
+| `content` | 消息内容 |
+| `type` | `USER` / `ASSISTANT` / `SYSTEM` / `TOOL` |
+| `timestamp` | 写入时间 |
+
+建表由 `spring.ai.chat.memory.repository.jdbc.initialize-schema=always` 自动初始化。之所以从默认的 `embedded` 改成 `always`，是因为 `jdbc:h2:file:` 在运行时不被视为 embedded，默认模式会静默跳过建表、导致「表不存在」；H2 建表脚本非幂等，但 Spring AI 已内置 `continue-on-error=true`，重复启动时「已存在」的报错会被吞掉，跨重启不丢数据。
+
+> 若要用 Redis / MongoDB 等：Spring AI 1.1.x 未内置对应的 `ChatMemoryRepository`，需自行实现该接口。
+
+### 7.4 滑动窗口 vs 摘要压缩（上下文裁剪策略）
+
+多轮对话的上下文会无限增长、最终爆 token，必须裁剪。常见策略对比：
+
+| 策略 | 思路 | 优点 | 缺点 | 复杂度 |
+|---|---|---|---|---|
+| **滑动窗口** | 只保留最近 N 条 | 简单、成本确定、token 严格有界 | 最旧的消息（甚至关键早期信息，如目的地、人名）会丢 | 低 |
+| 摘要压缩 | 用 LLM 把旧消息压成摘要 | 保留语义、可读性强 | 需额外 LLM 调用（成本+延迟），可能引入摘要误差、丢细节 | 中 |
+| 向量检索 | 只召回与当前问题相关的历史 | 精准、历史可长期保存 | 需向量库 + embedding，实现复杂，可能漏掉跨话题依赖 | 高 |
+| 混合策略 | 组合上述（滑窗 + 检索 / 滑窗 + 摘要） | 各取所长、效果最好 | 最复杂、调参多 | 很高 |
+
+**本项目选择「滑动窗口」**：`MessageWindowChatMemory` 开箱即用、token 严格有界、零额外模型调用，契合当前单用户 / 短会话场景。窗口大小通过 `travel-helper.memory.max-messages`（默认 20）配置，**按会话粒度生效**。
+
+若未来要保留更长历史又不爆 token，可在滑窗之上叠加摘要压缩或向量检索——`ChatMemory` 接口留有扩展空间，替换或包装现有实现即可。
+
+### 7.5 过期清理策略
+
+长期不活跃的会话会定时清理，避免记忆表无限膨胀（见 `ChatMemoryCleanupService`）。
+
+- **触发**：每天凌晨 2 点，`@Scheduled(cron = "0 0 2 * * *")`（入口类已加 `@EnableScheduling`）；
+- **判定**：取该会话 `timestamp`（最后一条消息）的最大值，早于 `now - expireDays` 天即判定过期并删除；
+- **配置**：`travel-helper.memory.expire-days`（默认 7）；
+- **删前日志**：每删一个会话前先 `log.info` 记录 `conversationId / 最后活动时间 / 消息条数`，删完再汇总；
+- **跨库兼容**：`timestamp` 是 PostgreSQL 保留字、H2 下是普通列名，服务内部按方言解析列名，切换 Neon 无需改动。
+
+### 7.6 记忆系统测试方法
+
+记忆的正确性体现在「上文是否被带进下一次请求、会话是否隔离、重启是否保留、超窗是否遗忘、过期是否清理」。相关测试均 mock 掉真实 `ChatModel`，不发起外部调用：
+
+| 场景 | 验证点 | 测试类 |
+|---|---|---|
+| 单轮对话 | 无跨轮依赖，首个请求正常返回 | `ChatControllerTest` |
+| 多轮对话（依赖上文） | 第二轮 Prompt 里包含第一轮历史 | `ChatMemoryExampleTest.sameConversationIdSharesContext` |
+| 会话隔离 | 不同 `conversationId` 的上下文互不可见 | `ChatMemoryExampleTest.differentConversationIdsAreIsolated` |
+| 持久化（重启恢复） | 重建 DataSource 后消息仍能读回 | `ChatMemoryPersistenceTest` |
+| 滑动窗口 | 超窗丢最旧、恰好满窗全保留 | `MessageWindowChatMemoryTest` |
+| 过期清理 | 只删超期、删前有日志、天数可配 | `ChatMemoryCleanupServiceTest` |
+
+> 并发（多会话同时对话）目前尚未实现专项测试，可后续用多线程 + 不同 `conversationId` 并发压测补充。
+
+---
+
+## 8. 已实现功能 / 待实现
 
 ### 已实现 ✅
 
@@ -227,8 +351,9 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 - 流式 SSE 对话接口 `GET /api/chat/stream`
 - 用户消息与偏好作为「数据」注入 `PromptTemplate`，防 prompt 注入
 - 联网搜索（Function Calling）：接入 Tavily，模型可自动查景点 / 攻略 / 实时信息
-- 多轮对话记忆（`ChatMemory` + `MessageChatMemoryAdvisor`，按 `conversationId` 共享 / 隔离上下文；`JdbcChatMemoryRepository` 落库，H2 / Neon 持久化）
+- 多轮对话记忆（`ChatMemory` + `MessageChatMemoryAdvisor`，按 `conversationId` 共享 / 隔离上下文；`JdbcChatMemoryRepository` 落库，H2 / Neon 持久化；`MessageWindowChatMemory` 滑动窗口 + 会话过期定时清理，详见 §7）
 - 单元测试（`@MockitoBean` mock 掉 `ChatModel`，测试接口非空 + 工具注册，无需真实调用大模型）
+- 记忆系统测试（会话共享 / 隔离 / 持久化 / 滑动窗口 / 过期清理，见 §7.6）
 
 ### 待实现 🚧
 
@@ -239,11 +364,12 @@ curl -N "http://localhost:8080/api/chat/stream?message=介绍大阪3天行程&ro
 - 前端界面
 - Docker 化部署 / CI
 - 更完整的集成测试（用 WireMock 挡 OpenAI 协议模拟两轮工具调用）
+- 并发对话（多会话同时对话）的专项测试
 
 ---
 
-## 8. Spring AI 工具调用实战
-### 8.1 工具调用原理
+## 9. Spring AI 工具调用实战
+### 9.1 工具调用原理
 
 **一句话**：LLM 只能生成文本；「工具调用」本质是模型输出一段结构化的「我想调函数 X，参数是 Y」，**真正执行 X 的是我们自己的 Java 代码**，执行完再把结果塞回给模型，让它生成最终答复。
 
@@ -282,7 +408,7 @@ sequenceDiagram
 - **模型可并行调用多个工具**：同一轮 assistant message 里可以有多个 `tool_calls`，模型会「多拿证据」而不是严格二选一。
 - `ToolCallingChatOptions.isInternalToolExecutionEnabled()` 默认 `true`；关掉后 ChatClient 不再自动执行，需要你手动调用 `.toolExecution()`。
 
-### 8.2 工具描述怎么写
+### 9.2 工具描述怎么写
 
 工具名 + `description` + 参数 `description` 是模型「要不要调、怎么调」的**唯一依据**（模型看不到你的方法体）。写描述就是写「给模型的说明书」。
 
@@ -302,7 +428,7 @@ sequenceDiagram
 
 **反面教材**：本仓库做过的 `searchRestaurant` 假工具，命名/描述和通用 `search` 重叠（「搜索当地餐厅、美食」），结果模型面对「推荐餐厅」**两个都调了**。这本身就是反模式——与其按领域堆一堆搜索工具让模型挑，不如一个通用 `search`，把领域意图写进 query（如 `search("成都 火锅店 推荐")`）。
 
-### 8.3 容错策略
+### 9.3 容错策略
 
 **总原则**：
 
@@ -328,7 +454,7 @@ sequenceDiagram
 
 何时上框架：只要重试 → Spring Retry / 手写循环即可；要「重试 + 熔断 + 限流 + 监控」成套、防重试风暴 → Resilience4j。
 
-### 8.4 排查「工具没被调用」
+### 9.4 排查「工具没被调用」
 
 按从易到难：
 
@@ -338,7 +464,7 @@ sequenceDiagram
 4. **内部执行开关被关了吗？** `isInternalToolExecutionEnabled == false` 时不会自动执行。
 5. **问题真的需要工具吗？** 问「你好」不调工具是正常表现，不是 bug。
 6. **看请求侧**：断点/日志看 `Prompt.getOptions()`（`ToolCallingChatOptions.getToolCallbacks()`）里有没有这个工具；没有 → 注册问题，有 → 模型没选它，回到第 2 点。
-7. **看执行侧**：在 `@Tool` 方法入口打断点 + `log`，确认是否真的被反射调用（这步在 mock 模型下不可达，见 8.1）。
+7. **看执行侧**：在 `@Tool` 方法入口打断点 + `log`，确认是否真的被反射调用（这步在 mock 模型下不可达，见 9.1）。
 8. **要看完整两轮执行**：用 WireMock 挡住 OpenAI 协议，返回「先 tool_calls、后最终回复」两轮响应。
 9. **模型「宁可编也不搜」**：靠 system prompt 铁律约束（本仓库已在 `travel-advisor` 里加了「实时信息必须先调搜索、搜不到就如实说明」）。
 
@@ -395,7 +521,7 @@ LLM 本身只能生成文本，无法获取实时信息（天气、汇率、数�
 | 返回格式有要求吗 | 推荐 String，简洁、接近自然语言；避免原始 JSON |
 | 工具重名会怎样 | 会冲突，可能报错或覆盖；方法名不同或用 `name` 显式指定 |
 
-## 1.5 Search API
+#### 1.5 Search API
 
 - 选了：**Tavily**
 - 免费额度：**1000 credit/月**（basic 搜索 1 credit/次、advanced 2 credit/次），**无需信用卡**

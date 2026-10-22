@@ -1,5 +1,8 @@
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\controller\ChatControllerTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\DatasourceSmokeTest.java
+C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\memory\ChatMemoryCleanupServiceTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\memory\ChatMemoryExampleTest.java
+C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\memory\ChatMemoryPersistenceTest.java
+C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\memory\MessageWindowChatMemoryTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\NeonSmokeTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\tools\WebSearchToolsTest.java

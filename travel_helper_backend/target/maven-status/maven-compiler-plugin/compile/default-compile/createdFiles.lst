@@ -1,5 +1,7 @@
 com\travelhelper\config\TavilyProperties.class
 com\travelhelper\config\ChatMemoryProperties.class
+com\travelhelper\memory\ChatMemoryCleanupService$ExpiredSession.class
+com\travelhelper\memory\ChatMemoryCleanupService.class
 com\travelhelper\tools\TimeTools.class
 com\travelhelper\tools\WebSearchTools.class
 com\travelhelper\config\ChatMemoryConfig.class

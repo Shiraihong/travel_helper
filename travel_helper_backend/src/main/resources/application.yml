@@ -81,9 +81,20 @@ travel-helper:
   # 多轮对话记忆：每个会话保留的最大消息条数（超过后遗忘最早的消息）
   memory:
     max-messages: 20
+    # 会话过期清理：超过该天数没有「活动」（最后一条消息时间戳更早）的会话，会在每天凌晨 2 点被自动删除
+    expire-days: 7
 
 # Tavily 联网搜索
 tavily:
   # API Key 来自环境变量 TAVILY_API_KEY
   api-key: ${TAVILY_API_KEY:}
   base-url: https://api.tavily.com
+
+# 日志：开启本项目 + Spring AI 的调试日志，便于观察模型请求/响应与 token 用量。
+# 想看记忆表 SPRING_AI_CHAT_MEMORY 的实际 SQL 时，取消下面 org.springframework.jdbc.core 那行的注释。
+logging:
+  level:
+    root: INFO
+    com.travelhelper: DEBUG
+    org.springframework.ai: DEBUG
+    # org.springframework.jdbc.core: DEBUG
