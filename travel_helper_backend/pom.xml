@@ -49,6 +49,12 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
 
+        <!-- JPA / Hibernate：用户偏好等业务实体的持久化 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
         <!-- PostgreSQL 驱动（连 Neon 时用） -->
         <dependency>
             <groupId>org.postgresql</groupId>

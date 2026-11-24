@@ -8,6 +8,13 @@ spring:
     url: jdbc:h2:file:./data/travelhelper
     driver-class-name: org.h2.Driver
 
+  # 业务实体（用户偏好）用 JPA/Hibernate 自动建表。
+  # 开发期用 update；上生产建议改成 validate + Flyway 管理迁移。
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+
   ai:
     openai:
       # 火山方舟 API Key
@@ -37,6 +44,13 @@ server:
 
 # 角色 -> system prompt 的映射，通过 ?role=xxx 传入
 travel-helper:
+  # 用户身份：接入认证后优先使用认证主体（如 JWT sub）；
+  # 本地开发没有认证时用 dev-user-id 兜底。上线请把 dev-user-id 置空、
+  # allow-user-id-param 设为 false，避免客户端伪造 userId。
+  auth:
+    dev-user-id: dev-user
+    allow-user-id-param: true
+
   roles:
     travel-advisor: |
       你是一位专业旅游规划师，拥有丰富的全球旅行知识与行程设计经验。

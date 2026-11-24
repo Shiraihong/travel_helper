@@ -3,6 +3,7 @@ package com.travelhelper.controller;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -16,6 +17,8 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -34,6 +37,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
+@ExtendWith(OutputCaptureExtension.class)
 class ChatControllerTest {
 
     private static final String UUID_PATTERN =
@@ -165,6 +169,37 @@ class ChatControllerTest {
         boolean clockToolSent = ((ToolCallingChatOptions) options).getToolCallbacks().stream()
                 .anyMatch(tc -> "getCurrentTime".equals(tc.getToolDefinition().name()));
         assertThat(clockToolSent).isTrue();
+    }
+
+    @Test
+    void planEndpointReturnsStructuredObject() throws Exception {
+        // mock 模型返回一段 JSON（真实场景是模型按注入的 JSON Schema 生成），验证能解析成 TripPlan 并作为 JSON 返回
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(new AssistantMessage(
+                        "{\"destination\":\"成都\",\"days\":3,\"attractions\":[\"熊猫基地\",\"宽窄巷子\",\"锦里\"]}")))));
+
+        mockMvc.perform(get("/api/chat/plan").param("message", "成都3日游"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.destination").value("成都"))
+                .andExpect(jsonPath("$.days").value(3))
+                .andExpect(jsonPath("$.attractions[0]").value("熊猫基地"))
+                .andExpect(jsonPath("$.attractions[1]").value("宽窄巷子"));
+    }
+
+    @Test
+    void planEndpointLogsRawAndParsed(CapturedOutput output) throws Exception {
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(new AssistantMessage(
+                        "{\"destination\":\"成都\",\"days\":3,\"attractions\":[\"熊猫基地\"]}")))));
+
+        mockMvc.perform(get("/api/chat/plan").param("message", "成都3日游"))
+                .andExpect(status().isOk());
+
+        // 原始日志行 + 解析对象（record 的 toString 前缀，ASCII 兜底，避免编码差异导致误判）
+        assertThat(output)
+                .contains("结构化输出 原始返回")
+                .contains("TripPlan[")
+                .contains("destination=");
     }
 
     /** 测试用本地工具，避免依赖项目中已删除的真实工具类。 */

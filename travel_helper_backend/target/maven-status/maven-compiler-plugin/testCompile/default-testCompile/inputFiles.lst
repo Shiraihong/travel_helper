@@ -5,4 +5,7 @@ C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\memory\ChatMemoryPersistenceTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\memory\MessageWindowChatMemoryTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\NeonSmokeTest.java
+C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\preference\PreferencePromptRendererTest.java
+C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\preference\UserPreferenceIntegrationTest.java
+C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\preference\UserPreferenceServiceTest.java
 C:\Users\zhangzhihong\software\travel_helper\travel_helper_backend\src\test\java\com\travelhelper\tools\WebSearchToolsTest.java

@@ -354,13 +354,14 @@ Spring AI 内置两种 `ChatMemoryRepository`：
 - 多轮对话记忆（`ChatMemory` + `MessageChatMemoryAdvisor`，按 `conversationId` 共享 / 隔离上下文；`JdbcChatMemoryRepository` 落库，H2 / Neon 持久化；`MessageWindowChatMemory` 滑动窗口 + 会话过期定时清理，详见 §7）
 - 单元测试（`@MockitoBean` mock 掉 `ChatModel`，测试接口非空 + 工具注册，无需真实调用大模型）
 - 记忆系统测试（会话共享 / 隔离 / 持久化 / 滑动窗口 / 过期清理，见 §7.6）
+- 用户偏好持久化（JPA + H2：主表 + 兴趣/忌口子表；PATCH 合并更新；聊天自动注入已保存偏好，见 §10）
 
 ### 待实现 🚧
 
 - 更多专业工具：天气、汇率、机票/酒店等结构化数据 API（如 `OpenWeatherMap`、`Amadeus`）
 - 结构化输出（`beanOutput` / JSON 实体）
 - 认证鉴权（API Key / JWT）
-- 用户偏好 / 历史行程持久化（数据库）
+- 历史行程持久化（数据库）
 - 前端界面
 - Docker 化部署 / CI
 - 更完整的集成测试（用 WireMock 挡 OpenAI 协议模拟两轮工具调用）
@@ -467,6 +468,80 @@ sequenceDiagram
 7. **看执行侧**：在 `@Tool` 方法入口打断点 + `log`，确认是否真的被反射调用（这步在 mock 模型下不可达，见 9.1）。
 8. **要看完整两轮执行**：用 WireMock 挡住 OpenAI 协议，返回「先 tool_calls、后最终回复」两轮响应。
 9. **模型「宁可编也不搜」**：靠 system prompt 铁律约束（本仓库已在 `travel-advisor` 里加了「实时信息必须先调搜索、搜不到就如实说明」）。
+
+---
+
+## 10. 用户偏好（JPA + H2）
+
+目标：把「预算、节奏、同行人、忌口、兴趣、出发地」记在库里，同一用户换会话仍可用。
+
+### 10.1 表结构
+
+| 表 | 说明 |
+|---|---|
+| `user_preference` | 一个用户一行，唯一键 `user_id` |
+| `user_preference_interest` | 兴趣（多值），主键 `(preference_id, interest)` |
+| `user_preference_dietary` | 忌口（多值），主键 `(preference_id, dietary)` |
+
+单值字段：`departure_city`、`pace`、`companion_type`、`adult_count`、`child_count`、`budget_level`、`budget_note`、`last_conversation_id`。
+
+枚举以 `VARCHAR` 存字符串（自动带 `check` 约束），不用 ORDINAL；空值统一为 `NULL`，空字符串不入库。
+
+### 10.2 为什么键是 user_id 而不是 conversationId
+
+`conversationId` 是一次会话的标识，新开对话就变；用它当键会导致「换会话读不到偏好」，还会被 7 天记忆清理任务连带删除。`last_conversation_id` 只用于溯源。
+
+身份来源（`UserIdentityResolver`）：
+
+1. 认证主体 `Principal`（接入 JWT 后即 `sub`）；
+2. `userId` 参数（仅 `travel-helper.auth.allow-user-id-param=true` 时，本地模拟多用户）；
+3. `travel-helper.auth.dev-user-id`（本地兜底）。
+
+上线时把 `dev-user-id` 置空、`allow-user-id-param` 设为 `false`。
+
+### 10.3 更新语义：合并，不覆盖
+
+`PATCH /api/preferences` 只写请求里出现的字段：
+
+| 输入 | 行为 |
+|---|---|
+| 标量 `null` | 不改（用户这轮没提） |
+| 集合 `null` | 不改 |
+| 集合 `[]` | 清空 |
+| 集合 `[a,b]` | 整体替换 |
+| `clearFields: ["budget"]` | 清空标量 |
+
+### 10.4 接口
+
+```powershell
+# 读取（没有记录返回空视图）
+curl.exe "http://localhost:8080/api/preferences"
+
+# 合并更新
+curl.exe -X PATCH "http://localhost:8080/api/preferences?conversationId=session-A" `
+  -H "Content-Type: application/json" `
+  -d '{"departureCity":"北京","pace":"RELAXED","budgetLevel":"COMFORT","interests":["美食"],"dietary":["不吃辣"]}'
+
+# 清空
+curl.exe -X DELETE "http://localhost:8080/api/preferences"
+```
+
+聊天接口新增可选 `userId` 参数；保存的偏好会以「数据」形式注入 user 消息，保持在 system prompt 之外。本次请求的 `prefs` 优先于已保存偏好。
+
+### 10.5 配置与建表
+
+- `spring-boot-starter-data-jpa` + 默认 H2 文件库；
+- `spring.jpa.hibernate.ddl-auto=update`（开发期）；生产建议 `validate` + Flyway；
+- `spring.jpa.open-in-view=false`；
+- 偏好表由 Hibernate 建；Spring AI 的 `SPRING_AI_CHAT_MEMORY` 仍由它自己的 `initialize-schema` 管理。
+
+### 10.6 测试
+
+| 场景 | 测试类 |
+|---|---|
+| 合并不抹掉未提字段 / `[]` 清空 / `clearFields` / 跨会话 / 用户隔离 / 版本递增 | `UserPreferenceServiceTest` |
+| 只输出已知字段、集合稳定排序 | `PreferencePromptRendererTest` |
+| 接口 GET/PATCH/DELETE + 聊天 Prompt 注入 | `UserPreferenceIntegrationTest` |
 
 ---
 

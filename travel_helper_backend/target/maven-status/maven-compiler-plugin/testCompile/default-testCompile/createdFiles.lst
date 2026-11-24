@@ -1,5 +1,8 @@
 com\travelhelper\memory\ChatMemoryCleanupServiceTest.class
 com\travelhelper\NeonSmokeTest.class
+com\travelhelper\preference\PreferencePromptRendererTest.class
+com\travelhelper\preference\UserPreferenceIntegrationTest.class
+com\travelhelper\preference\UserPreferenceServiceTest.class
 com\travelhelper\DatasourceSmokeTest.class
 com\travelhelper\memory\ChatMemoryExampleTest.class
 com\travelhelper\tools\WebSearchToolsTest.class
